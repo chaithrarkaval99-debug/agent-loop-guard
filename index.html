@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loop detection + token budget agent – live demo</title>
+<style>
+:root{--bg:#fafaf8;--card:#fff;--text:#1d1d1b;--mute:#6b6b66;--line:#e3e3dd;--ok:#1a7f4b;--bad:#c23b22;--warn:#b7791f;--acc:#3b5bdb}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#212120;--text:#ececea;--mute:#9a9a94;--line:#34342f;--ok:#4cc38a;--bad:#ff7b63;--warn:#e5b04a;--acc:#8ea2ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;padding:20px;max-width:960px;margin-inline:auto}
+h1{font-size:22px;margin:0 0 4px}p.sub{color:var(--mute);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{display:block;font-size:12px;color:var(--mute);margin-bottom:3px}
+input,select{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+button{margin-top:12px;padding:10px 18px;border:0;border-radius:8px;background:var(--acc);color:#fff;font:600 15px system-ui;cursor:pointer}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.head b{font-size:16px}
+.badge{font-size:12px;font-weight:600;padding:2px 9px;border-radius:99px;border:1px solid currentColor}
+.done{color:var(--ok)}.stuck{color:var(--bad)}.esc{color:var(--warn)}
+.stats{color:var(--mute);font-size:13px;margin-bottom:8px}
+.rows{max-height:320px;overflow-y:auto;border-top:1px solid var(--line)}
+.row{padding:6px 0;border-bottom:1px solid var(--line);font:12.5px/1.4 ui-monospace,Menlo,monospace;word-break:break-word}
+.row i{color:var(--mute);font-style:normal}
+.note{margin-top:8px;font-size:13px;padding:8px;border-radius:8px;background:var(--bg);border:1px solid var(--line)}
+.hint{color:var(--mute);font-size:13px}
+</style>
+</head>
+<body>
+<h1>Loop detection + token budget agent</h1>
+<p class="sub">Same customer request, run without and with guards. Try a misspelled name and watch what happens.</p>
+
+<div class="card">
+  <div class="controls">
+    <div><label>Customer name</label><input id="name" value="John Smiht"></div>
+    <div><label>When search fails, agent…</label>
+      <select id="vary"><option value="0">retries the exact same call</option><option value="1">retries with changed args</option></select></div>
+    <div><label>Max steps</label><input id="ms" type="number" value="10" min="1"></div>
+    <div><label>Max repeats of same call</label><input id="mr" type="number" value="2" min="1"></div>
+    <div><label>Cost budget ($)</label><input id="bd" type="number" value="0.0044" step="0.0001" min="0"></div>
+  </div>
+  <button onclick="go()">Run both</button>
+  <p class="hint">Try the correct name "John Smith" (or Priya Sharma, Ananya Rao…) to see a normal run. Demo uses a scripted mock LLM, no API calls.</p>
+</div>
+
+<div class="cols">
+  <div class="card" id="before"></div>
+  <div class="card" id="after"></div>
+</div>
+
+<script>
+const DB={"john smith":["ORD-1001","shipped, arrives Friday"],"priya sharma":["ORD-1002","processing, ships tomorrow"],"ananya rao":["ORD-1003","delivered on Monday"],"rahul verma":["ORD-1004","out for delivery today"],"meera iyer":["ORD-1005","shipped, arrives Thursday"],"arjun nair":["ORD-1006","delayed, new ETA next week"],"kavya reddy":["ORD-1007","processing, ships today"],"sanjay gupta":["ORD-1008","delivered on Sunday"],"divya menon":["ORD-1009","shipped, arrives Saturday"],"vikram singh":["ORD-1010","out for delivery today"]};
+const STATUS=Object.fromEntries(Object.values(DB));
+const tool=(n,a)=>n==="search_orders"?(DB[a.customer_name.trim().toLowerCase()]?"Found order "+DB[a.customer_name.trim().toLowerCase()][0]:"No results found."):(STATUS[a.order_id]||"Unknown order id.");
+const HARD=25;
+
+function run(name,vary,g){
+  let step=0,cost=0,seen={},trace=[],status=null,last=null,lastTool=null,answer="";
+  while(step<HARD){
+    if(g.on&&step>=g.maxSteps){status="step_limit";break}
+    step++;
+    let call=null;
+    if(!lastTool)call=["search_orders",{customer_name:name}];
+    else if(lastTool==="search_orders"&&last.startsWith("No results"))call=["search_orders",{customer_name:vary?name+" "+(step-1):name}];
+    else if(lastTool==="search_orders")call=["get_order_status",{order_id:last.match(/ORD-\d+/)[0]}];
+    cost+=(200+70*step)*1e-6+40*5e-6;
+    if(!call){status="done";answer="Your order status: "+last+".";break}
+    if(g.on&&cost>g.budget){status="budget";break}
+    const key=call[0]+JSON.stringify(call[1]);
+    seen[key]=(seen[key]||0)+1;
+    if(g.on&&seen[key]>g.maxRep){status="loop";break}
+    last=tool(call[0],call[1]);lastTool=call[0];
+    trace.push({step,call,result:last,cost});
+  }
+  if(!status)status="hard_cap";
+  return{status,step,cost,trace,answer};
+}
+
+const LABEL={done:"Resolved",loop:"Loop detected",step_limit:"Step limit hit",budget:"Budget hit",hard_cap:"Runaway"};
+function render(id,title,r,guarded){
+  const el=document.getElementById(id);
+  const cls=r.status==="done"?"done":(guarded?"esc":"stuck");
+  const rows=r.trace.map(t=>`<div class="row"><i>#${t.step}</i> ${t.call[0]}(${JSON.stringify(t.call[1]).replace(/"/g,"")}) → ${t.result} <i>$${t.cost.toFixed(5)}</i></div>`).join("");
+  let note="";
+  if(r.status==="done")note=`<div class="note">${r.answer}</div>`;
+  else if(guarded)note=`<div class="note"><b>Escalated:</b> "needs human" ticket created with conversation + trace.<br>User sees: "Sorry, I couldn't resolve this automatically. Someone from support will follow up shortly."</div>`;
+  else note=`<div class="note">No guard stopped it. Demo cut it off at ${HARD} steps; in production it would keep running and billing.</div>`;
+  el.innerHTML=`<div class="head"><b>${title}</b><span class="badge ${cls}">${LABEL[r.status]}</span></div>
+  <div class="stats">${r.step} LLM calls · $${r.cost.toFixed(5)}</div><div class="rows">${rows}</div>${note}`;
+}
+function go(){
+  const name=document.getElementById("name").value.trim()||"John Smith";
+  const vary=document.getElementById("vary").value==="1";
+  const g={on:true,maxSteps:+ms.value||10,maxRep:+mr.value||2,budget:+bd.value||0.0044};
+  render("before","Without guards",run(name,vary,{on:false}),false);
+  render("after","With guards",run(name,vary,g),true);
+}
+go();
+</script>
+</body>
+</html>
