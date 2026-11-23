@@ -1,4 +1,4 @@
-**[▶ Live demo]**[▶ Live demo](https://chaithrarkaval99-debug.github.io/agent-loop-guard/)**t guards.- try a misspelled name and compare with and without
+**[▶ Live demo](https://chaithrarkaval99-debug.github.io/agent-loop-guard/)**t guards.- try a misspelled name and compare with and without
 
 # Loop detection + token budget agent
 
